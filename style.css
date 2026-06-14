@@ -15,7 +15,6 @@ body {
 canvas {
     width: 100%;
     height: 100%;
-    /* This forces the canvas to fit the screen while keeping its 4:3 ratio */
     aspect-ratio: 4 / 3; 
     object-fit: contain;
     background: #111;

@@ -72,7 +72,6 @@ function setHighScore(val) { try { localStorage.setItem('highscore', val); } cat
 
 function playSound(type) {
     if (sounds[type]) {
-        // This line allows the sound to be played multiple times rapidly
         sounds[type].currentTime = 0;
         sounds[type].play().catch(e => console.log("Audio play prevented:", e));
     }
