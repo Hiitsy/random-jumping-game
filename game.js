@@ -49,9 +49,18 @@ function spawnParticles(x, y, color, count) {
 let cooldowns = { dash: 0, updraft: 0 };
 
 let state = {
+    screen: 'title',
     paused: false, cameraX: 0, cameraY: 0, platforms: [], hazards: [],
     keys: { left: false, right: false, up: false, shift: false, q: false }
 };
+
+function startGame() {
+    if (state.screen === 'title') {
+        state.screen = 'game';
+        particles = [];
+        initGame();
+    }
+}
 
 const player = { x: 50, y: 200, width: 20, height: 20, vx: 0, vy: 0, grounded: false, isClinging: false, dashDir: 1 };
 
@@ -87,8 +96,25 @@ function handleInput(event, isDown) {
     if (key === keybinds.pause && isDown) togglePause();
 }
 
-window.addEventListener('keydown', (e) => handleInput(e, true));
+window.addEventListener('keydown', (e) => {
+    if (state.screen === 'title') {
+        if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            e.preventDefault();
+        }
+        startGame();
+    } else {
+        handleInput(e, true);
+    }
+});
 window.addEventListener('keyup', (e) => handleInput(e, false));
+
+canvas.addEventListener('click', startGame);
+canvas.addEventListener('touchstart', (e) => {
+    if (state.screen === 'title') {
+        e.preventDefault();
+        startGame();
+    }
+});
 
 function setupMobileControls() {
     const controlsDiv = document.getElementById('controls');
@@ -154,6 +180,25 @@ function generateEndless() {
 }
 
 function update() {
+    if (state.screen === 'title') {
+        if (particles.length < 30 && Math.random() < 0.1) {
+            particles.push({
+                x: Math.random() * canvas.width,
+                y: canvas.height + 10,
+                vx: (Math.random() - 0.5) * 1.5,
+                vy: -Math.random() * 1.5 - 0.5,
+                life: 300 + Math.random() * 200,
+                color: 'rgba(255, 255, 255, ' + (0.1 + Math.random() * 0.4) + ')'
+            });
+        }
+        particles.forEach((p, i) => {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+            if (p.life <= 0) particles.splice(i, 1);
+        });
+        return;
+    }
     if (state.paused) return;
     if (deathTimer > 0) { deathTimer--; if (deathTimer === 0) { if (score > getHighScore()) setHighScore(score); initGame(); } return; }
     if (cooldowns.dash > 0) cooldowns.dash--;
@@ -202,6 +247,77 @@ function draw() {
     grad.addColorStop(1, theme.backgroundBottom);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (state.screen === 'title') {
+        // Draw title screen floating particles
+        particles.forEach(p => {
+            ctx.fillStyle = p.color;
+            ctx.fillRect(p.x, p.y, 3, 3);
+        });
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // Title text shadows/glow effect
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+        ctx.shadowBlur = 10;
+        ctx.shadowOffsetX = 4;
+        ctx.shadowOffsetY = 4;
+
+        // Draw title
+        ctx.fillStyle = '#FFF';
+        ctx.font = 'bold 44px "Segoe UI", Arial, sans-serif';
+        ctx.fillText('RANDOM JUMPING GAME', canvas.width / 2, canvas.height / 2 - 100);
+
+        // Reset shadow for subtitle/instruction
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+
+        // Pulsing "Press to play" text using sine of current time
+        let pulse = 0.5 + 0.5 * Math.sin(Date.now() / 250);
+        ctx.fillStyle = 'rgba(255, 235, 59, ' + pulse + ')'; // Glowing yellow
+        ctx.font = 'bold 22px "Segoe UI", Arial, sans-serif';
+        ctx.fillText('PRESS ANY KEY OR CLICK TO PLAY', canvas.width / 2, canvas.height / 2 - 20);
+
+        // Control Panel box background
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.roundRect = ctx.roundRect || function (x, y, w, h, r) {
+            if (typeof r === 'number') r = {tl: r, tr: r, br: r, bl: r};
+            this.beginPath();
+            this.moveTo(x + r.tl, y);
+            this.lineTo(x + w - r.tr, y);
+            this.quadraticCurveTo(x + w, y, x + w, y + r.tr);
+            this.lineTo(x + w, y + h - r.br);
+            this.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
+            this.lineTo(x + r.bl, y + h);
+            this.quadraticCurveTo(x, y + h, x, y + h - r.bl);
+            this.lineTo(x, y + r.tl);
+            this.quadraticCurveTo(x, y, x + r.tl, y);
+            this.closePath();
+            this.fill();
+        };
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        ctx.roundRect(canvas.width / 2 - 250, canvas.height / 2 + 30, 500, 160, 12);
+
+        // Control instructions
+        ctx.fillStyle = '#FFF';
+        ctx.font = 'bold 16px "Segoe UI", Arial, sans-serif';
+        ctx.fillText('CONTROLS', canvas.width / 2, canvas.height / 2 + 55);
+
+        ctx.font = '14px "Segoe UI", Arial, sans-serif';
+        ctx.fillStyle = '#E0E0E0';
+        ctx.fillText('A / D  or  L/R Buttons  —  Move Left / Right', canvas.width / 2, canvas.height / 2 + 85);
+        ctx.fillText('W / Space  or  J Button  —  Jump / Glide / Wall Cling', canvas.width / 2, canvas.height / 2 + 110);
+        ctx.fillText('Shift  or  D Button  —  Dash', canvas.width / 2, canvas.height / 2 + 135);
+        ctx.fillText('Q  or  U Button  —  Updraft  |  Esc  or  P Button  —  Pause', canvas.width / 2, canvas.height / 2 + 160);
+
+        // Reset textAlign and textBaseline so HUD/game draw normally
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+        return;
+    }
 
     ctx.save();
     ctx.translate(-state.cameraX, -state.cameraY);
