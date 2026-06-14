@@ -1,0 +1,41 @@
+body { 
+    margin: 0; padding: 0; overflow: hidden; background: #000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    width: 100vw; height: 100vh;
+}
+
+#game-container {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+canvas {
+    width: 100%;
+    height: 100%;
+    /* This forces the canvas to fit the screen while keeping its 4:3 ratio */
+    aspect-ratio: 4 / 3; 
+    object-fit: contain;
+    background: #111;
+}
+
+#controls { 
+    display: grid; grid-template-columns: repeat(4, 1fr); 
+    width: 100%; height: 20vh; gap: 5px; padding: 5px;
+}
+
+#pause-menu { 
+    position: absolute; 
+    top: 50%; 
+    left: 50%; 
+    transform: translate(-50%, -50%); 
+    display: none; 
+    color: white; 
+    font-size: 40px; 
+    background: rgba(0,0,0,0.8); 
+    padding: 20px; 
+    border-radius: 10px;
+    z-index: 100;
+}
