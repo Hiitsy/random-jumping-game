@@ -45,7 +45,7 @@ const pauseMenu = document.getElementById('pause-menu');
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
 const GRAVITY = 0.3, GRAVITY_GLIDE = 0.05, TERMINAL_VELOCITY = 8, MAX_JUMP_SPEED = -8.5, PLAYER_SPEED = 3.5, DEATH_Y = 600;
-let fuel = 100, isGliding = false, dashTimer = 0, deathTimer = 0, score = 0, inputLockTimer = 0;
+let fuel = 100, isGliding = false, dashTimer = 0, deathTimer = 0, score = 0, inputLockTimer = 0, blinkTimer = 0;
 let lastSafePosition = { x: 50, y: 200 };
 let xVelocityLocked = false;
 let teleportAnimation = null;
@@ -117,50 +117,279 @@ function updateTeleportRecall() {
     }
 }
 
+// Polyfill roundRect for older/incompatible environments if any
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+        if (typeof r === 'number') r = {tl: r, tr: r, br: r, bl: r};
+        else if (Array.isArray(r)) {
+            r = {tl: r[0], tr: r[1], br: r[2], bl: r[3]};
+        }
+        this.beginPath();
+        this.moveTo(x + r.tl, y);
+        this.lineTo(x + w - r.tr, y);
+        this.quadraticCurveTo(x + w, y, x + w, y + r.tr);
+        this.lineTo(x + w, y + h - r.br);
+        this.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
+        this.lineTo(x + r.bl, y + h);
+        this.quadraticCurveTo(x, y + h, x, y + h - r.bl);
+        this.lineTo(x, y + r.tl);
+        this.quadraticCurveTo(x, y, x + r.tl, y);
+        this.closePath();
+    };
+}
+
 function drawPlayer() {
     const cx = player.x + player.width / 2;
     const cy = player.y + player.height / 2;
-    const bodyColor = player.isClinging ? theme.playerClinging : (isGliding ? theme.playerGliding : theme.playerNormal);
+    
+    // Choose neon themes based on player state
+    let bodyColor1, bodyColor2, eyeColor, glowColor;
+    if (deathTimer > 0) {
+        bodyColor1 = '#555555';
+        bodyColor2 = '#333333';
+        eyeColor = '#ff3333';
+        glowColor = 'transparent';
+    } else if (teleportAnimation) {
+        bodyColor1 = '#E040FB'; // Teleport purple/magenta
+        bodyColor2 = '#7B1FA2';
+        eyeColor = '#F3E5F5';
+        glowColor = '#E040FB';
+    } else if (player.isClinging || player.isCeilingClinging) {
+        bodyColor1 = '#00E5FF'; // Cyber cyan
+        bodyColor2 = '#00838F';
+        eyeColor = '#E0F7FA';
+        glowColor = '#00E5FF';
+    } else if (isGliding) {
+        bodyColor1 = '#FFEB3B'; // Glowing yellow/gold
+        bodyColor2 = '#F57F17';
+        eyeColor = '#FFFDE7';
+        glowColor = '#FFEB3B';
+    } else if (dashTimer > 0) {
+        bodyColor1 = '#FF5722'; // Blaze orange/red
+        bodyColor2 = '#D84315';
+        eyeColor = '#FFFFFF';
+        glowColor = '#FF5722';
+    } else {
+        bodyColor1 = theme.playerNormal; // Configured main theme color (Orange-Red)
+        bodyColor2 = '#BF360C';
+        eyeColor = '#FFFFFF';
+        glowColor = theme.playerNormal;
+    }
 
     ctx.save();
     ctx.translate(cx, cy);
+    
+    // Apply squish, stretch, and tilting animations
+    let scaleY = player.scaleY || 1;
+    if (player.isCeilingClinging) {
+        scaleY = -scaleY; // Flip upside down like a spider!
+    }
+    ctx.scale(player.scaleX || 1, scaleY);
+    ctx.rotate(player.tilt || 0);
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+    // 1. Shadow underneath the player (drawn slightly below body bounds)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.28)';
     ctx.beginPath();
-    ctx.ellipse(0, player.height / 2 + 3, player.width * 0.55, 3, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, player.height / 2 + 2, player.width * 0.5, 3, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = bodyColor;
-    ctx.strokeStyle = '#2b1b16';
-    ctx.lineWidth = 2;
+    // 2. High-end Neon Glow effect
+    if (deathTimer === 0) {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = 10;
+    }
+
+    // 3. Slime / Cute Robot dome body shape (rounder top corners)
     ctx.beginPath();
-    ctx.roundRect(-player.width / 2, -player.height / 2, player.width, player.height, 6);
+    ctx.roundRect(-player.width / 2, -player.height / 2, player.width, player.height, [8, 8, 4, 4]);
+    
+    // Gradient fill
+    let bodyGrad = ctx.createLinearGradient(0, -player.height / 2, 0, player.height / 2);
+    bodyGrad.addColorStop(0, bodyColor1);
+    bodyGrad.addColorStop(1, bodyColor2);
+    ctx.fillStyle = bodyGrad;
     ctx.fill();
+
+    // Stroke border for crisp contrast (breaks the pure pixel art rules)
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    ctx.fillStyle = '#263238';
+    // Reset shadow so it doesn't affect face details
+    ctx.shadowBlur = 0;
+
+    // 4. Glossy jelly-like reflection highlight
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.38)';
     ctx.beginPath();
-    ctx.roundRect(-6, -6, 12, 7, 3);
+    ctx.ellipse(-player.width * 0.2, -player.height * 0.22, player.width * 0.2, player.height * 0.1, Math.PI / 4, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = '#E0F7FA';
-    ctx.fillRect(player.dashDir > 0 ? 1 : -4, -4, 3, 3);
+    // 5. Look directions for the face
+    let lookX = 0;
+    if (player.vx > 0) lookX = 1.5;
+    else if (player.vx < 0) lookX = -1.5;
+    
+    let lookY = 0;
+    if (player.vy < -1) lookY = -1.5; // Look up while jumping
+    else if (player.vy > 1) lookY = 1.5; // Look down while falling
 
-    ctx.fillStyle = '#3E2723';
-    ctx.fillRect(-7, 8, 5, 4);
-    ctx.fillRect(2, 8, 5, 4);
+    const eyeSize = 3.5;
+    const eyeSpacing = 4.5;
+    const eyeY = -1;
+    
+    ctx.fillStyle = eyeColor;
 
-    if (isGliding) {
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
-        ctx.lineWidth = 2;
+    if (deathTimer > 0) {
+        // Dead: draw "X" eyes
+        ctx.strokeStyle = eyeColor;
+        ctx.lineWidth = 1.8;
+        ctx.lineCap = 'round';
+        
+        // Left Eye X
         ctx.beginPath();
-        ctx.moveTo(-10, -2);
-        ctx.lineTo(-16, 4);
-        ctx.moveTo(10, -2);
-        ctx.lineTo(16, 4);
+        ctx.moveTo(-eyeSpacing + lookX - 2.5, eyeY + lookY - 2.5);
+        ctx.lineTo(-eyeSpacing + lookX + 2.5, eyeY + lookY + 2.5);
+        ctx.moveTo(-eyeSpacing + lookX + 2.5, eyeY + lookY - 2.5);
+        ctx.lineTo(-eyeSpacing + lookX - 2.5, eyeY + lookY + 2.5);
+        ctx.stroke();
+
+        // Right Eye X
+        ctx.beginPath();
+        ctx.moveTo(eyeSpacing + lookX - 2.5, eyeY + lookY - 2.5);
+        ctx.lineTo(eyeSpacing + lookX + 2.5, eyeY + lookY + 2.5);
+        ctx.moveTo(eyeSpacing + lookX + 2.5, eyeY + lookY - 2.5);
+        ctx.lineTo(eyeSpacing + lookX - 2.5, eyeY + lookY + 2.5);
+        ctx.stroke();
+    } else if (blinkTimer % 220 < 8) {
+        // Blinking (closed eyelids)
+        ctx.strokeStyle = eyeColor;
+        ctx.lineWidth = 1.8;
+        ctx.lineCap = 'round';
+        
+        ctx.beginPath();
+        ctx.moveTo(-eyeSpacing + lookX - 2, eyeY + lookY);
+        ctx.lineTo(-eyeSpacing + lookX + 2, eyeY + lookY);
+        ctx.moveTo(eyeSpacing + lookX - 2, eyeY + lookY);
+        ctx.lineTo(eyeSpacing + lookX + 2, eyeY + lookY);
+        ctx.stroke();
+    } else {
+        // Expressive oval pupils
+        ctx.beginPath();
+        ctx.ellipse(-eyeSpacing + lookX, eyeY + lookY, eyeSize * 0.7, eyeSize, 0, 0, Math.PI * 2);
+        ctx.ellipse(eyeSpacing + lookX, eyeY + lookY, eyeSize * 0.7, eyeSize, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Dark pupils inside
+        ctx.fillStyle = '#000000';
+        ctx.beginPath();
+        ctx.arc(-eyeSpacing + lookX, eyeY + lookY, 1, 0, Math.PI * 2);
+        ctx.arc(eyeSpacing + lookX, eyeY + lookY, 1, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // 6. Accessories & Effects
+    if (isGliding) {
+        // Glowing cyber-wings
+        ctx.strokeStyle = '#FFF59D';
+        ctx.lineWidth = 2.5;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        
+        // Left Wing
+        ctx.beginPath();
+        ctx.moveTo(-player.width / 2, -2);
+        ctx.lineTo(-player.width / 2 - 8, -6);
+        ctx.lineTo(-player.width / 2 - 14, 2);
+        ctx.lineTo(-player.width / 2 - 4, 4);
+        ctx.stroke();
+
+        // Right Wing
+        ctx.beginPath();
+        ctx.moveTo(player.width / 2, -2);
+        ctx.lineTo(player.width / 2 + 8, -6);
+        ctx.lineTo(player.width / 2 + 14, 2);
+        ctx.lineTo(player.width / 2 + 4, 4);
         ctx.stroke();
     }
 
+    if (player.isClinging) {
+        // Sticky wall cling pads
+        ctx.fillStyle = '#00E5FF';
+        let handSide = (player.vx > 0 || player.dashDir > 0) ? player.width / 2 : -player.width / 2;
+        ctx.beginPath();
+        ctx.arc(handSide, -3, 3, 0, Math.PI * 2);
+        ctx.arc(handSide, 3, 3, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    if (player.isCeilingClinging) {
+        // Sticky ceiling cling pads (drawn on the ceiling / player head)
+        ctx.fillStyle = '#00E5FF';
+        ctx.beginPath();
+        ctx.arc(-5, -player.height / 2, 3, 0, Math.PI * 2);
+        ctx.arc(5, -player.height / 2, 3, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
+
+function drawPixelPlatform(ctx, p) {
+    const isCeiling = p.variant === 'ceilingHazard';
+    const mainColor = isCeiling ? '#5D4037' : '#795548'; // Dirt body
+    const topColor = isCeiling ? '#8D6E63' : '#4CAF50';  // Grass/dust top
+    const darkBorder = '#3E2723';
+    const highlightColor = isCeiling ? '#BCAAA4' : '#8BC34A';
+    
+    ctx.save();
+    
+    // Draw dirt base body
+    ctx.fillStyle = mainColor;
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    
+    // Draw pixelated dark borders around the whole platform block (2px thick)
+    ctx.strokeStyle = darkBorder;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
+    
+    // Draw Top Layer (Grass / Dust)
+    ctx.fillStyle = topColor;
+    // We draw the top 6px as solid, then a jagged fringe of 4x4 pixel blocks at the bottom of the grass layer
+    ctx.fillRect(p.x + 2, p.y + 2, p.w - 4, 6);
+    
+    // Jagged fringe:
+    const pixelSize = 4;
+    for (let gx = p.x + 2; gx < p.x + p.w - 2; gx += pixelSize) {
+        // Deterministic heights using a simple hash based on X coordinate
+        const fringeHeight = ((Math.sin(gx) * 1000) & 1) ? 4 : 0;
+        if (fringeHeight > 0) {
+            ctx.fillRect(gx, p.y + 8, pixelSize, fringeHeight);
+        }
+    }
+    
+    // Draw highlights/details on grass (light specs)
+    ctx.fillStyle = isCeiling ? '#D7CCC8' : '#8BC34A';
+    for (let gx = p.x + 4; gx < p.x + p.w - 4; gx += 8) {
+        if (((Math.cos(gx) * 1000) & 1)) {
+            ctx.fillRect(gx, p.y + 3, pixelSize, pixelSize);
+        }
+    }
+    
+    // Draw dirt rock details (blocky spots inside dirt body)
+    ctx.fillStyle = highlightColor; // light spots
+    const detailYStart = p.y + 14;
+    const detailYEnd = p.y + p.h - 8;
+    for (let dx = p.x + 6; dx < p.x + p.w - 6; dx += 24) {
+        const dy = detailYStart + (Math.abs(Math.sin(dx) * 12345) % (detailYEnd - detailYStart - 4));
+        ctx.fillRect(dx, dy, pixelSize, pixelSize);
+    }
+    
+    ctx.fillStyle = darkBorder; // dark spots
+    for (let dx = p.x + 16; dx < p.x + p.w - 6; dx += 24) {
+        const dy = detailYStart + (Math.abs(Math.cos(dx) * 54321) % (detailYEnd - detailYStart - 4));
+        ctx.fillRect(dx, dy, pixelSize, pixelSize);
+    }
+    
     ctx.restore();
 }
 
@@ -201,7 +430,7 @@ function startGame() {
     }
 }
 
-const player = { x: 50, y: 200, width: 20, height: 20, vx: 0, vy: 0, grounded: false, isClinging: false, dashDir: 1 };
+const player = { x: 50, y: 200, width: 20, height: 20, vx: 0, vy: 0, grounded: false, isClinging: false, isCeilingClinging: false, dashDir: 1, scaleX: 1, scaleY: 1, tilt: 0 };
 
 function isMobile() { return 'ontouchstart' in window || navigator.maxTouchPoints > 0; }
 function getHighScore() { try { return localStorage.getItem('highscore') || 0; } catch (e) { return 0; } }
@@ -311,10 +540,13 @@ function initGame() {
     state.platforms = [{ x: 0, y: 300, w: 200, h: 40 }];
     state.hazards = [{ x: -5000, y: DEATH_Y, w: 20000, h: 100, type: 'carpet' }];
     score = 0; player.x = 50; player.y = 200; player.vx = 0; player.vy = 0;
+    player.scaleX = 1; player.scaleY = 1; player.tilt = 0;
+    player.isCeilingClinging = false;
     lastSafePosition = { x: player.x, y: player.y };
     teleportAnimation = null;
     teleportTrail = [];
     cooldowns.dash = 0; cooldowns.updraft = 0; cooldowns.teleport = 0; inputLockTimer = 0; xVelocityLocked = false; fuel = 100;
+    blinkTimer = 0;
     suppressedInputs.clear();
     clearActionInputs();
 }
@@ -401,6 +633,17 @@ function update() {
     if (cooldowns.dash > 0) cooldowns.dash--;
     if (cooldowns.updraft > 0) cooldowns.updraft--;
     if (cooldowns.teleport > 0) cooldowns.teleport--;
+    blinkTimer++;
+    
+    // Smoothly return player to base scale
+    player.scaleX += (1 - player.scaleX) * 0.18;
+    player.scaleY += (1 - player.scaleY) * 0.18;
+    
+    // Tilt body based on horizontal speed (tilt resets when wall clinging)
+    let targetTilt = player.vx * 0.04;
+    if (player.isClinging) targetTilt = 0;
+    player.tilt += (targetTilt - player.tilt) * 0.2;
+    
     score = Math.max(score, Math.floor(player.x / 10));
     generateEndless();
 
@@ -413,12 +656,26 @@ function update() {
         return;
     }
 
-    if (inputLockTimer === 0 && state.keys.shift && cooldowns.dash === 0) { playSound('dash'); spawnParticles(player.x + 10, player.y + 10, theme.dashVfx, 15); dashTimer = 10; cooldowns.dash = settings.dashCooldown; }
+    if (inputLockTimer === 0 && state.keys.shift && cooldowns.dash === 0) {
+        playSound('dash');
+        spawnParticles(player.x + 10, player.y + 10, theme.dashVfx, 15);
+        dashTimer = 10;
+        cooldowns.dash = settings.dashCooldown;
+        player.scaleX = 1.35; // stretch horizontally
+        player.scaleY = 0.7;  // compress vertically
+    }
     if (inputLockTimer === 0 && dashTimer > 0) { player.vx = player.dashDir * 18; player.vy = 0; dashTimer--; }
     else if (inputLockTimer === 0) { player.vx = (state.keys.right ? PLAYER_SPEED : 0) - (state.keys.left ? PLAYER_SPEED : 0); if (player.vx !== 0) player.dashDir = player.vx > 0 ? 1 : -1; }
     else { player.vx = 0; dashTimer = 0; }
     if (xVelocityLocked) player.vx = 0;
-    if (inputLockTimer === 0 && state.keys.q && cooldowns.updraft === 0) { spawnParticles(player.x + 10, player.y + 10, theme.updraftVfx, 15); player.vy = -12; playSound('updraft'); cooldowns.updraft = settings.updraftCooldown; }
+    if (inputLockTimer === 0 && state.keys.q && cooldowns.updraft === 0) {
+        spawnParticles(player.x + 10, player.y + 10, theme.updraftVfx, 15);
+        player.vy = -12;
+        playSound('updraft');
+        cooldowns.updraft = settings.updraftCooldown;
+        player.scaleX = 0.65; // stretch vertically
+        player.scaleY = 1.35;
+    }
     if (inputLockTimer === 0 && state.keys.teleport && cooldowns.teleport === 0) {
         beginTeleportRecall();
         updateParticles();
@@ -427,21 +684,92 @@ function update() {
     }
 
     player.x += player.vx;
+    
+    // Spawn subtle dust particles when moving fast on the ground
+    if (player.grounded && Math.abs(player.vx) > 0.5 && Math.random() < 0.25) {
+        particles.push({
+            x: player.x + (player.vx > 0 ? 0 : player.width),
+            y: player.y + player.height,
+            vx: -player.vx * 0.3 + (Math.random() - 0.5) * 0.8,
+            vy: -Math.random() * 1.2,
+            life: 12 + Math.random() * 6,
+            color: '#8D6E63' // Dust color matching ground/platform tops
+        });
+    }
+
+    // Spawn glowing particle trail when moving rapidly upwards (e.g., during an updraft boost)
+    if (player.vy < -3 && !player.grounded && !player.isClinging && deathTimer === 0 && Math.random() < 0.4) {
+        particles.push({
+            x: player.x + player.width / 2 + (Math.random() - 0.5) * 8,
+            y: player.y + player.height,
+            vx: (Math.random() - 0.5) * 2,
+            vy: -player.vy * 0.25 + Math.random() * 1.5, // drift downwards relative to the player
+            life: 12 + Math.random() * 8,
+            color: theme.updraftVfx
+        });
+    }
+    
     isGliding = false;
-    if (inputLockTimer === 0 && player.isClinging && state.keys.up && fuel > 0) { player.vy = 0; fuel = Math.max(0, fuel - 0.5); }
+    if (inputLockTimer === 0 && (player.isClinging || player.isCeilingClinging) && state.keys.up && fuel > 0) { player.vy = 0; fuel = Math.max(0, fuel - 0.5); }
     else if (inputLockTimer === 0 && state.keys.up && player.vy >= 0 && !player.grounded && fuel > 0) { player.vy += GRAVITY_GLIDE; fuel = Math.max(0, fuel - 1.2); isGliding = true; }
     else { player.vy += GRAVITY; if (fuel < 100) fuel += 2.5; }
 
     player.vy = Math.min(player.vy, TERMINAL_VELOCITY);
-    if (inputLockTimer === 0 && state.keys.up && player.grounded) { player.vy = MAX_JUMP_SPEED; player.grounded = false; }
+    if (inputLockTimer === 0 && state.keys.up && player.grounded) { 
+        player.vy = MAX_JUMP_SPEED; 
+        player.grounded = false; 
+        player.scaleX = 0.75; // stretch vertically on jump
+        player.scaleY = 1.25;
+    }
     player.y += player.vy; player.grounded = false;
 
     for (let p of state.platforms) {
         if (player.x < p.x + p.w && player.x + player.width > p.x && player.y < p.y + p.h && player.y + player.height > p.y) {
-            if (player.vy > 0) { player.y = p.y - player.height; player.vy = 0; player.grounded = true; lastSafePosition = { x: player.x, y: player.y }; }
+            if (player.vy > 0) {
+                if (!player.grounded) {
+                    // Impact squash on landing, based on landing velocity
+                    const squashAmount = Math.min(0.4, player.vy * 0.05);
+                    player.scaleX = 1 + squashAmount;
+                    player.scaleY = 1 - squashAmount;
+                }
+                player.y = p.y - player.height;
+                player.vy = 0;
+                player.grounded = true;
+                lastSafePosition = { x: player.x, y: player.y };
+            } else if (player.vy < 0) {
+                // Rising collision: bump head against the bottom edge instead of clipping inside
+                player.y = p.y + p.h;
+                player.vy = 0;
+            }
         }
     }
-    player.isClinging = (inputLockTimer === 0 && state.keys.up && fuel > 0 && state.platforms.some(p => player.x < p.x + p.w + 5 && player.x + player.width > p.x - 5 && player.y < p.y + p.h + 5 && player.y + player.height > p.y - 5) && !player.grounded);
+    
+    player.isClinging = false;
+    player.isCeilingClinging = false;
+    if (inputLockTimer === 0 && state.keys.up && fuel > 0 && !player.grounded) {
+        // 1. Check bottom-edge proximity for spider/ceiling cling (overlap horizontally, near bottom edge)
+        const touchingBottom = state.platforms.some(p => 
+            player.x < p.x + p.w && 
+            player.x + player.width > p.x && 
+            player.y >= p.y + p.h - 6 && 
+            player.y <= p.y + p.h + 6
+        );
+        
+        if (touchingBottom) {
+            player.isCeilingClinging = true;
+        } else {
+            // 2. Check side-edge proximity for wall cling
+            const touchingSide = state.platforms.some(p => 
+                player.x < p.x + p.w + 5 && 
+                player.x + player.width > p.x - 5 && 
+                player.y < p.y + p.h && 
+                player.y + player.height > p.y
+            );
+            if (touchingSide) {
+                player.isClinging = true;
+            }
+        }
+    }
 
     particles.forEach((p, i) => {
         p.x += p.vx;
@@ -465,71 +793,53 @@ function draw() {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (state.screen === 'title') {
-        // Draw title screen floating particles
+        // Draw title screen floating particles (retro pixel dust)
         particles.forEach(p => {
             ctx.fillStyle = p.color;
-            ctx.fillRect(p.x, p.y, 3, 3);
+            ctx.fillRect(p.x, p.y, 4, 4);
         });
 
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        // Title text shadows/glow effect
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-        ctx.shadowBlur = 10;
-        ctx.shadowOffsetX = 4;
-        ctx.shadowOffsetY = 4;
-
-        // Draw title
-        ctx.fillStyle = '#FFF';
-        ctx.font = 'bold 44px "Segoe UI", Arial, sans-serif';
+        // 1. Draw Title text with a retro sharp 3px drop-shadow
+        ctx.font = '24px "Press Start 2P", monospace';
+        ctx.fillStyle = '#000000';
+        ctx.fillText('RANDOM JUMPING GAME', canvas.width / 2 + 3, canvas.height / 2 - 100 + 3);
+        ctx.fillStyle = '#FFD54F'; // Nice golden yellow
         ctx.fillText('RANDOM JUMPING GAME', canvas.width / 2, canvas.height / 2 - 100);
 
-        // Reset shadow for subtitle/instruction
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 0;
+        // 2. Pulsing retro start text
+        let pulse = 0.5 + 0.5 * Math.sin(Date.now() / 200);
+        ctx.font = '10px "Press Start 2P", monospace';
+        ctx.fillStyle = 'rgba(255, 255, 255, ' + pulse + ')';
+        ctx.fillText('PRESS ANY KEY OR CLICK TO PLAY', canvas.width / 2, canvas.height / 2 - 25);
 
-        // Pulsing "Press to play" text using sine of current time
-        let pulse = 0.5 + 0.5 * Math.sin(Date.now() / 250);
-        ctx.fillStyle = 'rgba(255, 235, 59, ' + pulse + ')'; // Glowing yellow
-        ctx.font = 'bold 22px "Segoe UI", Arial, sans-serif';
-        ctx.fillText('PRESS ANY KEY OR CLICK TO PLAY', canvas.width / 2, canvas.height / 2 - 20);
+        // 3. Control Instructions Box (Simple, sharp retro panel)
+        const boxW = 560;
+        const boxH = 155;
+        const boxX = canvas.width / 2 - boxW / 2;
+        const boxY = canvas.height / 2 + 25;
+        
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(boxX, boxY, boxW, boxH);
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-        // Control Panel box background
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-        ctx.roundRect = ctx.roundRect || function (x, y, w, h, r) {
-            if (typeof r === 'number') r = {tl: r, tr: r, br: r, bl: r};
-            this.beginPath();
-            this.moveTo(x + r.tl, y);
-            this.lineTo(x + w - r.tr, y);
-            this.quadraticCurveTo(x + w, y, x + w, y + r.tr);
-            this.lineTo(x + w, y + h - r.br);
-            this.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
-            this.lineTo(x + r.bl, y + h);
-            this.quadraticCurveTo(x, y + h, x, y + h - r.bl);
-            this.lineTo(x, y + r.tl);
-            this.quadraticCurveTo(x, y, x + r.tl, y);
-            this.closePath();
-            this.fill();
-        };
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-        ctx.roundRect(canvas.width / 2 - 250, canvas.height / 2 + 30, 500, 160, 12);
+        // Instructions header
+        ctx.fillStyle = '#FF8A65'; // Retro coral
+        ctx.fillText('CONTROLS', canvas.width / 2, boxY + 25);
 
-        // Control instructions
-        ctx.fillStyle = '#FFF';
-        ctx.font = 'bold 16px "Segoe UI", Arial, sans-serif';
-        ctx.fillText('CONTROLS', canvas.width / 2, canvas.height / 2 + 55);
+        // Instructions text (blocky and aligned)
+        ctx.fillStyle = '#ECEFF1';
+        ctx.font = '8px "Press Start 2P", monospace';
+        ctx.fillText('A / D  or  L/R Buttons  —  Move Left / Right', canvas.width / 2, boxY + 55);
+        ctx.fillText('W / Space  or  J Button  —  Jump / Glide / Wall Cling', canvas.width / 2, boxY + 80);
+        ctx.fillText('Shift  or  D Button  —  Dash', canvas.width / 2, boxY + 105);
+        ctx.fillText('Q/U  —  Updraft  |  E/T  —  Teleport  |  Esc/P  —  Pause', canvas.width / 2, boxY + 130);
 
-        ctx.font = '14px "Segoe UI", Arial, sans-serif';
-        ctx.fillStyle = '#E0E0E0';
-        ctx.fillText('A / D  or  L/R Buttons  —  Move Left / Right', canvas.width / 2, canvas.height / 2 + 85);
-        ctx.fillText('W / Space  or  J Button  —  Jump / Glide / Wall Cling', canvas.width / 2, canvas.height / 2 + 110);
-        ctx.fillText('Shift  or  D Button  —  Dash', canvas.width / 2, canvas.height / 2 + 135);
-        ctx.fillText('Q / U Button  —  Updraft  |  E / T Button  —  Teleport  |  Esc / P  —  Pause', canvas.width / 2, canvas.height / 2 + 160);
-
-        // Reset textAlign and textBaseline so HUD/game draw normally
+        // Reset text alignment for HUD/Gameplay drawing
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
         return;
@@ -540,42 +850,115 @@ function draw() {
 
     for (let p of state.platforms) {
         if (p.variant === 'ceilingHazard') {
-            ctx.strokeStyle = '#D7CCC8';
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            ctx.moveTo(p.x + 18, p.y);
-            ctx.lineTo(p.x + 18, p.y - 40);
-            ctx.moveTo(p.x + p.w - 18, p.y);
-            ctx.lineTo(p.x + p.w - 18, p.y - 40);
-            ctx.stroke();
+            // Draw pixel-art chains
+            ctx.fillStyle = '#90A4AE'; // Iron grey
+            const chainX1 = p.x + 16;
+            const chainX2 = p.x + p.w - 20;
+            for (let cy = p.y - 40; cy < p.y; cy += 8) {
+                ctx.fillRect(chainX1, cy, 4, 6);
+                ctx.fillRect(chainX2, cy, 4, 6);
+            }
         }
-        ctx.fillStyle = p.variant === 'ceilingHazard' ? '#5D4037' : '#795548';
-        ctx.fillRect(p.x, p.y, p.w, p.h);
-        ctx.fillStyle = p.variant === 'ceilingHazard' ? '#A1887F' : '#4CAF50';
-        ctx.fillRect(p.x, p.y, p.w, 10);
+        drawPixelPlatform(ctx, p);
     }
 
-    ctx.fillStyle = '#EF5350';
     for (let h of state.hazards) {
         if (h.type === 'spike') {
+            // Upward metal spike
+            ctx.fillStyle = '#37474F';
+            ctx.fillRect(h.x + 2, h.y + h.h - 3, h.w - 4, 3);
+            
+            ctx.fillStyle = '#78909C'; // Slate metal
             ctx.beginPath();
-            ctx.moveTo(h.x, h.y + h.h);
+            ctx.moveTo(h.x, h.y + h.h - 3);
             ctx.lineTo(h.x + h.w / 2, h.y);
-            ctx.lineTo(h.x + h.w, h.y + h.h);
+            ctx.lineTo(h.x + h.w, h.y + h.h - 3);
+            ctx.closePath();
             ctx.fill();
-        } else if (h.type === 'bottomSpike') {
+            
+            // Left specular highlight
+            ctx.fillStyle = '#CFD8DC';
             ctx.beginPath();
-            ctx.moveTo(h.x, h.y);
-            ctx.lineTo(h.x + h.w / 2, h.y + h.h);
-            ctx.lineTo(h.x + h.w, h.y);
+            ctx.moveTo(h.x, h.y + h.h - 3);
+            ctx.lineTo(h.x + h.w / 2, h.y);
+            ctx.lineTo(h.x + h.w / 2, h.y + h.h - 3);
+            ctx.closePath();
             ctx.fill();
+            
+            // Dark outline
+            ctx.strokeStyle = '#263238';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(h.x, h.y + h.h - 3);
+            ctx.lineTo(h.x + h.w / 2, h.y);
+            ctx.lineTo(h.x + h.w, h.y + h.h - 3);
+            ctx.stroke();
+        } else if (h.type === 'bottomSpike') {
+            // Downward hanging spike
+            ctx.fillStyle = '#37474F';
+            ctx.fillRect(h.x + 2, h.y, h.w - 4, 3);
+            
+            ctx.fillStyle = '#78909C';
+            ctx.beginPath();
+            ctx.moveTo(h.x, h.y + 3);
+            ctx.lineTo(h.x + h.w / 2, h.y + h.h);
+            ctx.lineTo(h.x + h.w, h.y + 3);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Highlight
+            ctx.fillStyle = '#CFD8DC';
+            ctx.beginPath();
+            ctx.moveTo(h.x, h.y + 3);
+            ctx.lineTo(h.x + h.w / 2, h.y + h.h);
+            ctx.lineTo(h.x + h.w / 2, h.y + 3);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Outline
+            ctx.strokeStyle = '#263238';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(h.x, h.y + 3);
+            ctx.lineTo(h.x + h.w / 2, h.y + h.h);
+            ctx.lineTo(h.x + h.w, h.y + 3);
+            ctx.stroke();
         } else if (h.type === 'carpet') {
-            for (let i = Math.floor(h.x / 30) * 30; i < h.x + h.w; i += 30) {
+            // Draw repeating row of pixelated metal spikes on top of a dark pit block
+            ctx.fillStyle = '#263238'; // Dark pit block fill
+            ctx.fillRect(h.x, h.y + 16, h.w, h.h - 16);
+            
+            const spikeW = 16;
+            const spikeH = 16;
+            const startX = Math.floor(h.x / spikeW) * spikeW;
+            
+            for (let sx = startX; sx < h.x + h.w; sx += spikeW) {
+                // Base metal fill
+                ctx.fillStyle = '#78909C';
                 ctx.beginPath();
-                ctx.moveTo(i, h.y + h.h);
-                ctx.lineTo(i + 15, h.y);
-                ctx.lineTo(i + 30, h.y + h.h);
+                ctx.moveTo(sx, h.y + spikeH);
+                ctx.lineTo(sx + spikeW / 2, h.y);
+                ctx.lineTo(sx + spikeW, h.y + spikeH);
+                ctx.closePath();
                 ctx.fill();
+                
+                // Highlight
+                ctx.fillStyle = '#CFD8DC';
+                ctx.beginPath();
+                ctx.moveTo(sx, h.y + spikeH);
+                ctx.lineTo(sx + spikeW / 2, h.y);
+                ctx.lineTo(sx + spikeW / 2, h.y + spikeH);
+                ctx.closePath();
+                ctx.fill();
+                
+                // Outline
+                ctx.strokeStyle = '#37474F';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(sx, h.y + spikeH);
+                ctx.lineTo(sx + spikeW / 2, h.y);
+                ctx.lineTo(sx + spikeW, h.y + spikeH);
+                ctx.stroke();
             }
         }
     }
@@ -596,21 +979,63 @@ function draw() {
         ctx.globalAlpha = 1.0;
     }
 
-    ctx.fillStyle = player.isClinging ? theme.playerClinging : (isGliding ? theme.playerGliding : theme.playerNormal);
-    ctx.fillRect(player.x, player.y, player.width, player.height);
+    drawPlayer();
     ctx.restore();
 
-    ctx.fillStyle = theme.uiPanel; ctx.fillRect(5, 5, 170, 130);
-    ctx.fillStyle = theme.uiText;
-    ctx.fillText('SCORE: ' + score, 15, 20);
-    ctx.fillText('BEST: ' + getHighScore(), 15, 40);
-    ctx.fillStyle = '#fff'; ctx.fillText('FUEL', 15, 60); ctx.fillRect(15, 65, fuel, 10);
-    ctx.fillStyle = cooldowns.dash > 0 ? theme.cooldownBar : theme.dashBarReady;
-    ctx.fillText('DASH', 15, 95); ctx.fillRect(15, 100, 40, 10);
-    ctx.fillStyle = cooldowns.updraft > 0 ? theme.cooldownBar : theme.updraftBarReady;
-    ctx.fillText('UPDRFT', 65, 95); ctx.fillRect(65, 100, 40, 10);
-    ctx.fillStyle = cooldowns.teleport > 0 ? theme.cooldownBar : theme.teleportBarReady;
-    ctx.fillText('TELE', 115, 95); ctx.fillRect(115, 100, 40, 10);
+    ctx.save();
+    ctx.font = '10px "Press Start 2P", monospace';
+    
+    // Reposition HUD to Top Right and increase sizes by ~25%
+    const hudW = 240;
+    const hudH = 140;
+    const hudX = canvas.width - hudW - 15;
+    const hudY = 15;
+    
+    // HUD Panel Background & Border
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(hudX, hudY, hudW, hudH);
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(hudX, hudY, hudW, hudH);
+    
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('SCORE: ' + score, hudX + 15, hudY + 30);
+    ctx.fillText('BEST : ' + getHighScore(), hudX + 15, hudY + 50);
+    
+    ctx.fillText('FUEL', hudX + 15, hudY + 74);
+    // Draw fuel bar frame (larger scale)
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(hudX + 15, hudY + 80, 132, 12);
+    ctx.fillStyle = '#263238';
+    ctx.fillRect(hudX + 16, hudY + 81, 130, 10);
+    // Fill fuel (adjusted multiplier for 130px width)
+    ctx.fillStyle = '#4CAF50';
+    ctx.fillRect(hudX + 16, hudY + 81, Math.min(130, fuel * 1.3), 10);
+    
+    // Ability cooldown bars (repositioned and widened)
+    // Dash
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('DSH', hudX + 15, hudY + 112);
+    ctx.strokeRect(hudX + 15, hudY + 116, 52, 10);
+    ctx.fillStyle = cooldowns.dash > 0 ? '#BF360C' : '#00E5FF';
+    ctx.fillRect(hudX + 16, hudY + 117, 50 * (cooldowns.dash > 0 ? (settings.dashCooldown - cooldowns.dash) / settings.dashCooldown : 1), 8);
+    
+    // Updraft
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('UPD', hudX + 85, hudY + 112);
+    ctx.strokeRect(hudX + 85, hudY + 116, 52, 10);
+    ctx.fillStyle = cooldowns.updraft > 0 ? '#BF360C' : '#FFEB3B';
+    ctx.fillRect(hudX + 86, hudY + 117, 50 * (cooldowns.updraft > 0 ? (settings.updraftCooldown - cooldowns.updraft) / settings.updraftCooldown : 1), 8);
+    
+    // Teleport
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillText('TEL', hudX + 155, hudY + 112);
+    ctx.strokeRect(hudX + 155, hudY + 116, 52, 10);
+    ctx.fillStyle = cooldowns.teleport > 0 ? '#BF360C' : '#E040FB';
+    ctx.fillRect(hudX + 156, hudY + 117, 50 * (cooldowns.teleport > 0 ? (settings.teleportCooldown - cooldowns.teleport) / settings.teleportCooldown : 1), 8);
+    
+    ctx.restore();
 }
 
 initGame(); setupMobileControls();
