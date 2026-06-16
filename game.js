@@ -9,6 +9,10 @@ const theme = {
     uiText: 'white',
     dashBarReady: '#00ff00',
     updraftBarReady: '#00ff00',
+    teleportBarReady: '#00ff00',
+    dashVfx: '#ff9800',
+    updraftVfx: '#64ffda',
+    teleportVfx: '#9C27B0',
     cooldownBar: '#ff0000'
 };
 
@@ -20,7 +24,8 @@ const sounds = {
 
 const settings = {
     dashCooldown: 200,
-    updraftCooldown: 200
+    updraftCooldown: 200,
+    teleportCooldown: 300
 };
 
 const keybinds = {
@@ -29,6 +34,7 @@ const keybinds = {
     jump: 'w',
     dash: 'Shift',
     updraft: 'q',
+    teleport: 'e',
     pause: 'Escape'
 };
 
@@ -39,20 +45,153 @@ const pauseMenu = document.getElementById('pause-menu');
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
 const GRAVITY = 0.3, GRAVITY_GLIDE = 0.05, TERMINAL_VELOCITY = 8, MAX_JUMP_SPEED = -8.5, PLAYER_SPEED = 3.5, DEATH_Y = 600;
-let fuel = 100, isGliding = false, dashTimer = 0, deathTimer = 0, score = 0;
+let fuel = 100, isGliding = false, dashTimer = 0, deathTimer = 0, score = 0, inputLockTimer = 0;
+let lastSafePosition = { x: 50, y: 200 };
+let xVelocityLocked = false;
+let teleportAnimation = null;
+let teleportTrail = [];
+let suppressedInputs = new Set();
 let particles = [];
 function spawnParticles(x, y, color, count) {
     for (let i = 0; i < count; i++) {
         particles.push({ x, y, vx: (Math.random() - 0.5) * 10, vy: (Math.random() - 0.5) * 10, life: 20, color });
     }
 }
-let cooldowns = { dash: 0, updraft: 0 };
+
+function updateParticles() {
+    particles.forEach(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+    });
+    particles = particles.filter(p => p.life > 0);
+}
+
+function updateTeleportTrail() {
+    teleportTrail.forEach(trail => {
+        trail.life--;
+    });
+    teleportTrail = teleportTrail.filter(trail => trail.life > 0);
+}
+
+function beginTeleportRecall() {
+    teleportAnimation = {
+        fromX: player.x,
+        fromY: player.y,
+        toX: lastSafePosition.x,
+        toY: lastSafePosition.y,
+        frame: 0,
+        duration: 24
+    };
+    player.vx = 0;
+    player.vy = 0;
+    dashTimer = 0;
+    cooldowns.teleport = settings.teleportCooldown;
+    inputLockTimer = 60;
+    xVelocityLocked = suppressHeldActionInputs();
+    spawnParticles(player.x + 10, player.y + 10, theme.teleportVfx, 20);
+}
+
+function updateTeleportRecall() {
+    teleportAnimation.frame++;
+    const t = Math.min(teleportAnimation.frame / teleportAnimation.duration, 1);
+    const eased = 1 - Math.pow(1 - t, 3);
+
+    teleportTrail.push({ x: player.x, y: player.y, life: 18 });
+    player.x = teleportAnimation.fromX + (teleportAnimation.toX - teleportAnimation.fromX) * eased;
+    player.y = teleportAnimation.fromY + (teleportAnimation.toY - teleportAnimation.fromY) * eased;
+    player.vx = 0;
+    player.vy = 0;
+
+    if (teleportAnimation.frame % 3 === 0) {
+        spawnParticles(player.x + 10, player.y + 10, theme.teleportVfx, 6);
+    }
+
+    if (t === 1) {
+        player.x = teleportAnimation.toX;
+        player.y = teleportAnimation.toY;
+        player.grounded = true;
+        teleportAnimation = null;
+        teleportTrail = [];
+        spawnParticles(player.x + 10, player.y + 10, theme.teleportVfx, 24);
+    }
+}
+
+function drawPlayer() {
+    const cx = player.x + player.width / 2;
+    const cy = player.y + player.height / 2;
+    const bodyColor = player.isClinging ? theme.playerClinging : (isGliding ? theme.playerGliding : theme.playerNormal);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, player.height / 2 + 3, player.width * 0.55, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = bodyColor;
+    ctx.strokeStyle = '#2b1b16';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(-player.width / 2, -player.height / 2, player.width, player.height, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#263238';
+    ctx.beginPath();
+    ctx.roundRect(-6, -6, 12, 7, 3);
+    ctx.fill();
+
+    ctx.fillStyle = '#E0F7FA';
+    ctx.fillRect(player.dashDir > 0 ? 1 : -4, -4, 3, 3);
+
+    ctx.fillStyle = '#3E2723';
+    ctx.fillRect(-7, 8, 5, 4);
+    ctx.fillRect(2, 8, 5, 4);
+
+    if (isGliding) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-10, -2);
+        ctx.lineTo(-16, 4);
+        ctx.moveTo(10, -2);
+        ctx.lineTo(16, 4);
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+let cooldowns = { dash: 0, updraft: 0, teleport: 0 };
 
 let state = {
     screen: 'title',
     paused: false, cameraX: 0, cameraY: 0, platforms: [], hazards: [],
-    keys: { left: false, right: false, up: false, shift: false, q: false }
+    keys: { left: false, right: false, up: false, shift: false, q: false, teleport: false }
 };
+
+function clearActionInputs() {
+    state.keys.left = false;
+    state.keys.right = false;
+    state.keys.up = false;
+    state.keys.shift = false;
+    state.keys.q = false;
+    state.keys.teleport = false;
+}
+
+function suppressHeldActionInputs() {
+    const wasMoving = state.keys.left || state.keys.right;
+    if (state.keys.left) suppressedInputs.add(keybinds.left);
+    if (state.keys.right) suppressedInputs.add(keybinds.right);
+    if (state.keys.up) [keybinds.jump, ' ', 'Jump'].forEach(key => suppressedInputs.add(key));
+    if (state.keys.shift) [keybinds.dash, 'Dash'].forEach(key => suppressedInputs.add(key));
+    if (state.keys.q) [keybinds.updraft, 'Up'].forEach(key => suppressedInputs.add(key));
+    if (state.keys.teleport) [keybinds.teleport, 'Teleport'].forEach(key => suppressedInputs.add(key));
+    clearActionInputs();
+    return wasMoving;
+}
 
 function startGame() {
     if (state.screen === 'title') {
@@ -88,11 +227,27 @@ function playSound(type) {
 
 function handleInput(event, isDown) {
     const key = event.key || event;
+    if (xVelocityLocked && (key === keybinds.left || key === keybinds.right)) {
+        if (!isDown) {
+            suppressedInputs.delete(key);
+            xVelocityLocked = suppressedInputs.has(keybinds.left) || suppressedInputs.has(keybinds.right);
+        }
+        return;
+    }
+    if (suppressedInputs.has(key)) {
+        if (!isDown) suppressedInputs.delete(key);
+        return;
+    }
+    if (inputLockTimer > 0 && isDown && key !== keybinds.pause) {
+        suppressedInputs.add(key);
+        return;
+    }
     if (key === keybinds.left) state.keys.left = isDown;
     if (key === keybinds.right) state.keys.right = isDown;
     if (key === keybinds.jump || key === ' ' || key === 'Jump') state.keys.up = isDown;
     if (key === keybinds.dash || key === 'Dash') state.keys.shift = isDown;
     if (key === keybinds.updraft || key === 'Up') state.keys.q = isDown;
+    if (key === keybinds.teleport || key === 'Teleport') state.keys.teleport = isDown;
     if (key === keybinds.pause && isDown) togglePause();
 }
 
@@ -123,7 +278,8 @@ function setupMobileControls() {
     const map = [
         { id: 'btn-left', key: 'a' }, { id: 'btn-right', key: 'd' },
         { id: 'btn-jump', key: 'Jump' }, { id: 'btn-dash', key: 'Dash' },
-        { id: 'btn-updraft', key: 'Up' }, { id: 'btn-pause', key: 'Pause' }
+        { id: 'btn-updraft', key: 'Up' }, { id: 'btn-teleport', key: 'Teleport' },
+        { id: 'btn-pause', key: 'Pause' }
     ];
     map.forEach(btn => {
         const el = document.getElementById(btn.id);
@@ -154,29 +310,74 @@ function togglePause() { state.paused = !state.paused; if (pauseMenu) pauseMenu.
 function initGame() {
     state.platforms = [{ x: 0, y: 300, w: 200, h: 40 }];
     state.hazards = [{ x: -5000, y: DEATH_Y, w: 20000, h: 100, type: 'carpet' }];
-    score = 0; player.x = 50; player.y = 200;
-    cooldowns.dash = 0; cooldowns.updraft = 0; fuel = 100;
+    score = 0; player.x = 50; player.y = 200; player.vx = 0; player.vy = 0;
+    lastSafePosition = { x: player.x, y: player.y };
+    teleportAnimation = null;
+    teleportTrail = [];
+    cooldowns.dash = 0; cooldowns.updraft = 0; cooldowns.teleport = 0; inputLockTimer = 0; xVelocityLocked = false; fuel = 100;
+    suppressedInputs.clear();
+    clearActionInputs();
 }
 
 function generateEndless() {
     let difficulty = Math.min(score / 500, 2.5);
-    let last = state.platforms[state.platforms.length - 1];
+    let pathPlatforms = state.platforms.filter(p => !p.obstacle);
+    let last = pathPlatforms[pathPlatforms.length - 1];
 
     if (last.x < player.x + 2000) {
         let nextX = last.x + last.w + 50 + (Math.random() * 80 * difficulty);
         let drift = (Math.random() - 0.5) * 300;
         let nextY = Math.max(200, Math.min(500, last.y + drift));
         let w = Math.max(50, 100 - (difficulty * 20));
+        let variants = ['safe', 'safe', 'leftSpike'];
 
-        state.platforms.push({ x: nextX, y: nextY, w: w, h: 40 });
+        if (score >= 100) variants.push('rightSpike');
+        if (score >= 200) variants.push('doubleSpike');
+        if (score >= 300) variants.push('ceilingWithFloor', 'ceilingStandalone');
 
-        if (Math.random() < 0.4 + (difficulty / 5)) {
-            state.hazards.push({ x: nextX + 20, y: nextY - 15, w: 20, h: 15, type: 'spike' });
+        let variant = variants[Math.floor(Math.random() * variants.length)];
+        if (Math.random() > 0.45 + (difficulty / 6)) variant = 'safe';
+
+        if (variant === 'ceilingWithFloor') {
+            w = Math.max(95, w);
+            nextY = Math.max(320, Math.min(500, nextY + 40));
+            let ceilingY = Math.max(130, nextY - 150);
+            let ceilingW = Math.max(110, w + 25);
+            state.platforms.push({ x: nextX - 10, y: ceilingY, w: ceilingW, h: 30, variant: 'ceilingHazard', obstacle: true });
+            addBottomSpikes(nextX - 10, ceilingY, ceilingW, 30);
+        }
+
+        if (variant === 'ceilingStandalone') {
+            w = Math.max(85, w);
+            let ceilingY = Math.max(140, last.y - 170);
+            let ceilingW = Math.max(105, w + 40);
+            state.platforms.push({ x: nextX + 10, y: ceilingY, w: ceilingW, h: 30, variant: 'ceilingHazard', obstacle: true });
+            addBottomSpikes(nextX + 10, ceilingY, ceilingW, 30);
+            nextX = nextX + ceilingW + 55;
+            nextY = Math.max(220, last.y - 45);
+            variant = 'safe';
+        }
+
+        state.platforms.push({ x: nextX, y: nextY, w: w, h: 40, variant: variant });
+
+        if (variant === 'leftSpike' || variant === 'doubleSpike') {
+            state.hazards.push({ x: nextX + 18, y: nextY - 15, w: 20, h: 15, type: 'spike' });
+        }
+        if (variant === 'rightSpike' || variant === 'doubleSpike') {
+            state.hazards.push({ x: nextX + w - 38, y: nextY - 15, w: 20, h: 15, type: 'spike' });
         }
     }
 
     state.platforms = state.platforms.filter(p => p.x > player.x - 1000);
     state.hazards = state.hazards.filter(h => h.x > player.x - 1000 || h.type === 'carpet');
+}
+
+function addBottomSpikes(x, y, w, h) {
+    let spikeCount = Math.max(2, Math.floor(w / 35));
+    for (let i = 0; i < spikeCount; i++) {
+        let spikeX = x + 16 + i * ((w - 32) / spikeCount);
+        state.hazards.push({ x: spikeX, y: y + h, w: 18, h: 16, type: 'bottomSpike' });
+    }
 }
 
 function update() {
@@ -191,41 +392,56 @@ function update() {
                 color: 'rgba(255, 255, 255, ' + (0.1 + Math.random() * 0.4) + ')'
             });
         }
-        particles.forEach((p, i) => {
-            p.x += p.vx;
-            p.y += p.vy;
-            p.life--;
-            if (p.life <= 0) particles.splice(i, 1);
-        });
+        updateParticles();
         return;
     }
     if (state.paused) return;
     if (deathTimer > 0) { deathTimer--; if (deathTimer === 0) { if (score > getHighScore()) setHighScore(score); initGame(); } return; }
+    if (inputLockTimer > 0) inputLockTimer--;
     if (cooldowns.dash > 0) cooldowns.dash--;
     if (cooldowns.updraft > 0) cooldowns.updraft--;
+    if (cooldowns.teleport > 0) cooldowns.teleport--;
     score = Math.max(score, Math.floor(player.x / 10));
     generateEndless();
 
-    if (state.keys.shift && cooldowns.dash === 0) { playSound('dash'); spawnParticles(player.x + 10, player.y + 10, theme.dashBarReady, 15); dashTimer = 10; cooldowns.dash = settings.dashCooldown; }
-    if (dashTimer > 0) { player.vx = player.dashDir * 18; player.vy = 0; dashTimer--; }
-    else { player.vx = (state.keys.right ? PLAYER_SPEED : 0) - (state.keys.left ? PLAYER_SPEED : 0); if (player.vx !== 0) player.dashDir = player.vx > 0 ? 1 : -1; }
-    if (state.keys.q && cooldowns.updraft === 0) { spawnParticles(player.x + 10, player.y + 10, theme.updraftBarReady, 15); player.vy = -12; playSound('updraft'); cooldowns.updraft = settings.updraftCooldown; }
+    if (teleportAnimation) {
+        updateTeleportRecall();
+        updateParticles();
+        updateTeleportTrail();
+        state.cameraX += (player.x - canvas.width / 3 - state.cameraX) * 0.1;
+        state.cameraY += (player.y - canvas.height / 2 - state.cameraY) * 0.1;
+        return;
+    }
+
+    if (inputLockTimer === 0 && state.keys.shift && cooldowns.dash === 0) { playSound('dash'); spawnParticles(player.x + 10, player.y + 10, theme.dashVfx, 15); dashTimer = 10; cooldowns.dash = settings.dashCooldown; }
+    if (inputLockTimer === 0 && dashTimer > 0) { player.vx = player.dashDir * 18; player.vy = 0; dashTimer--; }
+    else if (inputLockTimer === 0) { player.vx = (state.keys.right ? PLAYER_SPEED : 0) - (state.keys.left ? PLAYER_SPEED : 0); if (player.vx !== 0) player.dashDir = player.vx > 0 ? 1 : -1; }
+    else { player.vx = 0; dashTimer = 0; }
+    if (xVelocityLocked) player.vx = 0;
+    if (inputLockTimer === 0 && state.keys.q && cooldowns.updraft === 0) { spawnParticles(player.x + 10, player.y + 10, theme.updraftVfx, 15); player.vy = -12; playSound('updraft'); cooldowns.updraft = settings.updraftCooldown; }
+    if (inputLockTimer === 0 && state.keys.teleport && cooldowns.teleport === 0) {
+        beginTeleportRecall();
+        updateParticles();
+        updateTeleportTrail();
+        return;
+    }
 
     player.x += player.vx;
-    if (player.isClinging && state.keys.up && fuel > 0) { player.vy = 0; fuel = Math.max(0, fuel - 0.5); }
-    else if (state.keys.up && player.vy >= 0 && !player.grounded && fuel > 0) { player.vy += GRAVITY_GLIDE; fuel = Math.max(0, fuel - 1.2); }
+    isGliding = false;
+    if (inputLockTimer === 0 && player.isClinging && state.keys.up && fuel > 0) { player.vy = 0; fuel = Math.max(0, fuel - 0.5); }
+    else if (inputLockTimer === 0 && state.keys.up && player.vy >= 0 && !player.grounded && fuel > 0) { player.vy += GRAVITY_GLIDE; fuel = Math.max(0, fuel - 1.2); isGliding = true; }
     else { player.vy += GRAVITY; if (fuel < 100) fuel += 2.5; }
 
     player.vy = Math.min(player.vy, TERMINAL_VELOCITY);
-    if (state.keys.up && player.grounded) { player.vy = MAX_JUMP_SPEED; player.grounded = false; }
+    if (inputLockTimer === 0 && state.keys.up && player.grounded) { player.vy = MAX_JUMP_SPEED; player.grounded = false; }
     player.y += player.vy; player.grounded = false;
 
     for (let p of state.platforms) {
         if (player.x < p.x + p.w && player.x + player.width > p.x && player.y < p.y + p.h && player.y + player.height > p.y) {
-            if (player.vy > 0) { player.y = p.y - player.height; player.vy = 0; player.grounded = true; }
+            if (player.vy > 0) { player.y = p.y - player.height; player.vy = 0; player.grounded = true; lastSafePosition = { x: player.x, y: player.y }; }
         }
     }
-    player.isClinging = (state.keys.up && fuel > 0 && state.platforms.some(p => player.x < p.x + p.w + 5 && player.x + player.width > p.x - 5 && player.y < p.y + p.h + 5 && player.y + player.height > p.y - 5) && !player.grounded);
+    player.isClinging = (inputLockTimer === 0 && state.keys.up && fuel > 0 && state.platforms.some(p => player.x < p.x + p.w + 5 && player.x + player.width > p.x - 5 && player.y < p.y + p.h + 5 && player.y + player.height > p.y - 5) && !player.grounded);
 
     particles.forEach((p, i) => {
         p.x += p.vx;
@@ -311,7 +527,7 @@ function draw() {
         ctx.fillText('A / D  or  L/R Buttons  —  Move Left / Right', canvas.width / 2, canvas.height / 2 + 85);
         ctx.fillText('W / Space  or  J Button  —  Jump / Glide / Wall Cling', canvas.width / 2, canvas.height / 2 + 110);
         ctx.fillText('Shift  or  D Button  —  Dash', canvas.width / 2, canvas.height / 2 + 135);
-        ctx.fillText('Q  or  U Button  —  Updraft  |  Esc  or  P Button  —  Pause', canvas.width / 2, canvas.height / 2 + 160);
+        ctx.fillText('Q / U Button  —  Updraft  |  E / T Button  —  Teleport  |  Esc / P  —  Pause', canvas.width / 2, canvas.height / 2 + 160);
 
         // Reset textAlign and textBaseline so HUD/game draw normally
         ctx.textAlign = 'left';
@@ -323,8 +539,20 @@ function draw() {
     ctx.translate(-state.cameraX, -state.cameraY);
 
     for (let p of state.platforms) {
-        ctx.fillStyle = '#795548'; ctx.fillRect(p.x, p.y, p.w, p.h);
-        ctx.fillStyle = '#4CAF50'; ctx.fillRect(p.x, p.y, p.w, 10);
+        if (p.variant === 'ceilingHazard') {
+            ctx.strokeStyle = '#D7CCC8';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(p.x + 18, p.y);
+            ctx.lineTo(p.x + 18, p.y - 40);
+            ctx.moveTo(p.x + p.w - 18, p.y);
+            ctx.lineTo(p.x + p.w - 18, p.y - 40);
+            ctx.stroke();
+        }
+        ctx.fillStyle = p.variant === 'ceilingHazard' ? '#5D4037' : '#795548';
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+        ctx.fillStyle = p.variant === 'ceilingHazard' ? '#A1887F' : '#4CAF50';
+        ctx.fillRect(p.x, p.y, p.w, 10);
     }
 
     ctx.fillStyle = '#EF5350';
@@ -334,6 +562,12 @@ function draw() {
             ctx.moveTo(h.x, h.y + h.h);
             ctx.lineTo(h.x + h.w / 2, h.y);
             ctx.lineTo(h.x + h.w, h.y + h.h);
+            ctx.fill();
+        } else if (h.type === 'bottomSpike') {
+            ctx.beginPath();
+            ctx.moveTo(h.x, h.y);
+            ctx.lineTo(h.x + h.w / 2, h.y + h.h);
+            ctx.lineTo(h.x + h.w, h.y);
             ctx.fill();
         } else if (h.type === 'carpet') {
             for (let i = Math.floor(h.x / 30) * 30; i < h.x + h.w; i += 30) {
@@ -353,11 +587,20 @@ function draw() {
     });
     ctx.globalAlpha = 1.0;
 
+    if (teleportAnimation) {
+        teleportTrail.forEach(trail => {
+            ctx.globalAlpha = trail.life / 18 * 0.55;
+            ctx.fillStyle = theme.teleportVfx;
+            ctx.fillRect(trail.x - 3, trail.y - 3, player.width + 6, player.height + 6);
+        });
+        ctx.globalAlpha = 1.0;
+    }
+
     ctx.fillStyle = player.isClinging ? theme.playerClinging : (isGliding ? theme.playerGliding : theme.playerNormal);
     ctx.fillRect(player.x, player.y, player.width, player.height);
     ctx.restore();
 
-    ctx.fillStyle = theme.uiPanel; ctx.fillRect(5, 5, 120, 130);
+    ctx.fillStyle = theme.uiPanel; ctx.fillRect(5, 5, 170, 130);
     ctx.fillStyle = theme.uiText;
     ctx.fillText('SCORE: ' + score, 15, 20);
     ctx.fillText('BEST: ' + getHighScore(), 15, 40);
@@ -366,6 +609,8 @@ function draw() {
     ctx.fillText('DASH', 15, 95); ctx.fillRect(15, 100, 40, 10);
     ctx.fillStyle = cooldowns.updraft > 0 ? theme.cooldownBar : theme.updraftBarReady;
     ctx.fillText('UPDRFT', 65, 95); ctx.fillRect(65, 100, 40, 10);
+    ctx.fillStyle = cooldowns.teleport > 0 ? theme.cooldownBar : theme.teleportBarReady;
+    ctx.fillText('TELE', 115, 95); ctx.fillRect(115, 100, 40, 10);
 }
 
 initGame(); setupMobileControls();
